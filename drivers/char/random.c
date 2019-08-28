@@ -278,6 +278,16 @@
 
 /* #define ADD_INTERRUPT_BENCH */
 
+/* 
+* Debug Counters!
+*/
+static int add_device_randomness_counter = 0;
+static int add_hwgenerator_randomness_counter = 0;
+static int add_input_randomness_counter = 0;
+static int add_disk_randomness_counter = 0;
+static int add_interrupt_randomness_counter = 0;
+static int add_timer_randomness_counter = 0;
+
 /*
  * Configuration information
  */
@@ -933,6 +943,8 @@ static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
 		__u32	key[8];
 	} buf;
 
+	printk("CRYPTDET: crng_reseed");
+
 	if (r) {
 		num = extract_entropy(r, &buf, 32, 16, 0);
 		if (num == 0)
@@ -1106,6 +1118,8 @@ void add_device_randomness(const void *buf, unsigned int size)
 	unsigned long time = random_get_entropy() ^ jiffies;
 	unsigned long flags;
 
+	add_device_randomness_counter++;
+
 	if (!crng_ready() && size)
 		crng_slow_load(buf, size);
 
@@ -1175,13 +1189,17 @@ static void add_timer_randomness(struct timer_rand_state *state, unsigned num)
 	 * Round down by 1 bit on general principles,
 	 * and limit entropy entimate to 12 bits.
 	 */
+	int entropy_before = input_pool.entropy_count;
 	credit_entropy_bits(r, min_t(int, fls(delta>>1), 11));
+	add_timer_randomness_counter += input_pool.entropy_count - entropy_before;
 }
 
 void add_input_randomness(unsigned int type, unsigned int code,
 				 unsigned int value)
 {
 	static unsigned char last_value;
+
+	add_input_randomness_counter++;
 
 	/* ignore autorepeat and the like */
 	if (value == last_value)
@@ -1293,14 +1311,19 @@ void add_interrupt_randomness(int irq, int irq_flags)
 
 	fast_pool->count = 0;
 
+	int entropy_before = r.entropy_count;
 	/* award one bit for the contents of the fast pool */
 	credit_entropy_bits(r, credit + 1);
+	add_interrupt_randomness_counter += r.entropy_count - entropy_before;
 }
 EXPORT_SYMBOL_GPL(add_interrupt_randomness);
 
 #ifdef CONFIG_BLOCK
 void add_disk_randomness(struct gendisk *disk)
 {
+
+	add_disk_randomness_counter++;
+
 	if (!disk || !disk->random)
 		return;
 	/* first major is 1, so we get >= 0x200 here */
@@ -1876,9 +1899,65 @@ _random_read(int nonblock, char __user *buf, size_t nbytes)
 	}
 }
 
+static ssize_t input_pool_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos){
+	printk("CRYPTDET: input_pool_read\n");
+	if (copy_to_user(buf, input_pool.pool, nbytes)){
+		printk("CRYPTDET: input_pool_read failed!\n");
+		return -EFAULT;
+	}
+	return nbytes;
+}
+
+static ssize_t input_pool_write(struct file *file, const char __user *buffer, size_t count, loff_t *ppos){
+	printk("CRYPTDET: input_pool_write\n");
+	if (copy_from_user(input_pool.pool, buffer, count)){
+		printk("CRYPTDET: input_pool_write failed!\n");
+		return -EFAULT;
+	}
+	return 0;
+}
+
+static ssize_t blocking_pool_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos){
+	printk("CRYPTDET: blocking_pool_read\n");
+	if (copy_to_user(buf, blocking_pool.pool, nbytes)){
+		printk("CRYPTDET: blocking_pool_read failed!\n");
+		return -EFAULT;
+	}
+	return nbytes;
+}
+
+static ssize_t blocking_pool_write(struct file *file, const char __user *buffer, size_t count, loff_t *ppos){
+	printk("CRYPTDET: blocking_pool_write\n");
+	if (copy_from_user(blocking_pool.pool, buffer, count)){
+		printk("CRYPTDET: blocking_pool_write failed!\n");
+		return -EFAULT;
+	}
+	return 0;
+}
+
+static ssize_t fast_pool_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos){
+	// printk("CRYPTDET: fast_pool_read\n");
+	// if (copy_to_user(buf, fast_pool.pool, nbytes)){
+	// 	printk("CRYPTDET: fast_pool_read failed!\n");
+	// 	return -EFAULT;
+	// }
+	//return nbytes;
+}
+
+static ssize_t fast_pool_write(struct file *file, const char __user *buffer, size_t count, loff_t *ppos){
+	// printk("CRYPTDET: fast_pool_write\n");
+	// if (copy_from_user(fast_pool.pool, buffer, count)){
+	// 	printk("CRYPTDET: fast_pool_write failed!\n");
+	// 	return -EFAULT;
+	// }
+	// return 0;
+}
+
 static ssize_t
 random_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 {
+	printk("CRYPTDET: random_read device=%d hwgenerator=%d input=%d timer=%d disk=%d interrupt=%d entropie=%d\n", add_device_randomness_counter, add_hwgenerator_randomness_counter, add_input_randomness_counter, add_timer_randomness_counter, add_disk_randomness_counter, add_interrupt_randomness_counter, ENTROPY_BITS(&input_pool));
+
 	return _random_read(file->f_flags & O_NONBLOCK, buf, nbytes);
 }
 
@@ -1888,6 +1967,8 @@ urandom_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 	unsigned long flags;
 	static int maxwarn = 10;
 	int ret;
+
+	printk("CRYPTDET: urandom_read device=%d hwgenerator=%d input=%d timer=%d disk=%d interrupt=%d entropie=%d\n", add_device_randomness_counter, add_hwgenerator_randomness_counter, add_input_randomness_counter, add_timer_randomness_counter, add_disk_randomness_counter, add_interrupt_randomness_counter, ENTROPY_BITS(&input_pool));
 
 	if (!crng_ready() && maxwarn > 0) {
 		maxwarn--;
@@ -1968,6 +2049,8 @@ static long random_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 	int __user *p = (int __user *)arg;
 	int retval;
 
+	printk("CRYPTDET: random_ioctl");
+
 	switch (cmd) {
 	case RNDGETENTCNT:
 		/* inherently racy, no point locking */
@@ -2039,6 +2122,21 @@ const struct file_operations urandom_fops = {
 	.unlocked_ioctl = random_ioctl,
 	.fasync = random_fasync,
 	.llseek = noop_llseek,
+};
+
+const struct file_operations input_pool_fops = {
+	.read = input_pool_read,
+	.write = input_pool_write,
+};
+
+const struct file_operations blocking_pool_fops = {
+	.read = blocking_pool_read,
+	.write = blocking_pool_write,
+};
+
+const struct file_operations fast_pool_fops = {
+	.read = fast_pool_read,
+	.write = fast_pool_write,
 };
 
 SYSCALL_DEFINE3(getrandom, char __user *, buf, size_t, count,
@@ -2353,6 +2451,8 @@ void add_hwgenerator_randomness(const char *buffer, size_t count,
 {
 	struct entropy_store *poolp = &input_pool;
 
+	add_hwgenerator_randomness_counter++;
+
 	if (unlikely(crng_init == 0)) {
 		crng_fast_load(buffer, count);
 		return;
@@ -2365,6 +2465,7 @@ void add_hwgenerator_randomness(const char *buffer, size_t count,
 	wait_event_interruptible(random_write_wait, kthread_should_stop() ||
 			ENTROPY_BITS(&input_pool) <= random_write_wakeup_bits);
 	mix_pool_bytes(poolp, buffer, count);
+
 	credit_entropy_bits(poolp, entropy);
 }
 EXPORT_SYMBOL_GPL(add_hwgenerator_randomness);
