@@ -492,6 +492,8 @@ static ssize_t extract_entropy(struct entropy_store *r, void *buf,
 static ssize_t _extract_entropy(struct entropy_store *r, void *buf,
 				size_t nbytes, int fips);
 
+static void cryptdet_log_entropy(struct entropy_store* pool, const char* event, __s32 entropy_change);
+
 static void crng_reseed(struct crng_state *crng, struct entropy_store *r);
 static void push_to_pool(struct work_struct *work);
 static __u32 input_pool_data[INPUT_POOL_WORDS] __latent_entropy;
@@ -579,6 +581,7 @@ static void __mix_pool_bytes(struct entropy_store *r, const void *in,
 			     int nbytes)
 {
 	trace_mix_pool_bytes_nolock(r->name, nbytes, _RET_IP_);
+	cryptdet_log_entropy(r, "MIX", nbytes);
 	_mix_pool_bytes(r, in, nbytes);
 }
 
@@ -588,6 +591,7 @@ static void mix_pool_bytes(struct entropy_store *r, const void *in,
 	unsigned long flags;
 
 	trace_mix_pool_bytes(r->name, nbytes, _RET_IP_);
+	cryptdet_log_entropy(r, "MIX", nbytes);
 	spin_lock_irqsave(&r->lock, flags);
 	_mix_pool_bytes(r, in, nbytes);
 	spin_unlock_irqrestore(&r->lock, flags);
@@ -718,6 +722,7 @@ retry:
 		r->entropy_total = 0;
 	}
 
+	cryptdet_log_entropy(r, "CREDIT", nbits);
 	trace_credit_entropy_bits(r->name, nbits,
 				  entropy_count >> ENTROPY_SHIFT,
 				  r->entropy_total, _RET_IP_);
@@ -1117,6 +1122,7 @@ void add_device_randomness(const void *buf, unsigned int size)
 {
 	unsigned long time = random_get_entropy() ^ jiffies;
 	unsigned long flags;
+	__u32 entropy_before, entropy_after;
 
 	add_device_randomness_counter++;
 
@@ -1124,10 +1130,13 @@ void add_device_randomness(const void *buf, unsigned int size)
 		crng_slow_load(buf, size);
 
 	trace_add_device_randomness(size, _RET_IP_);
+	entropy_before = input_pool.entropy_count;
 	spin_lock_irqsave(&input_pool.lock, flags);
 	_mix_pool_bytes(&input_pool, buf, size);
 	_mix_pool_bytes(&input_pool, &time, sizeof(time));
 	spin_unlock_irqrestore(&input_pool.lock, flags);
+	entropy_after =  input_pool.entropy_count;
+	cryptdet_log_entropy(&input_pool, "DEVICE", entropy_after - entropy_before);
 }
 EXPORT_SYMBOL(add_device_randomness);
 
@@ -1198,6 +1207,7 @@ void add_input_randomness(unsigned int type, unsigned int code,
 				 unsigned int value)
 {
 	static unsigned char last_value;
+	__u32 entropy_before, entropy_after;
 
 	add_input_randomness_counter++;
 
@@ -1206,8 +1216,11 @@ void add_input_randomness(unsigned int type, unsigned int code,
 		return;
 
 	last_value = value;
+	entropy_before = input_pool.entropy_count;
 	add_timer_randomness(&input_timer_state,
 			     (type << 4) ^ code ^ (code >> 4) ^ value);
+	entropy_after =  input_pool.entropy_count;
+	cryptdet_log_entropy(&input_pool, "INPUT", entropy_after - entropy_before);
 	trace_add_input_randomness(ENTROPY_BITS(&input_pool));
 }
 EXPORT_SYMBOL_GPL(add_input_randomness);
@@ -1311,10 +1324,11 @@ void add_interrupt_randomness(int irq, int irq_flags)
 
 	fast_pool->count = 0;
 
-	int entropy_before = r.entropy_count;
+	// int entropy_before = r.entropy_count;
 	/* award one bit for the contents of the fast pool */
 	credit_entropy_bits(r, credit + 1);
-	add_interrupt_randomness_counter += r.entropy_count - entropy_before;
+	cryptdet_log_entropy(r, "IRQ", credit + 1);
+	// add_interrupt_randomness_counter += r.entropy_count - entropy_before;
 }
 EXPORT_SYMBOL_GPL(add_interrupt_randomness);
 
@@ -1366,10 +1380,12 @@ static void _xfer_secondary_pool(struct entropy_store *r, size_t nbytes)
 	/* but never more than the buffer size */
 	bytes = min_t(int, bytes, sizeof(tmp));
 
+	cryptdet_log_entropy(r->pull, "REQUEST_XFER", nbytes * 8);
 	trace_xfer_secondary_pool(r->name, bytes * 8, nbytes * 8,
 				  ENTROPY_BITS(r), ENTROPY_BITS(r->pull));
 	bytes = extract_entropy(r->pull, tmp, bytes,
 				random_read_wakeup_bits / 8, 0);
+	cryptdet_log_entropy(r, "XFER", bytes * 8);
 	mix_pool_bytes(r, tmp, bytes);
 	credit_entropy_bits(r, bytes*8);
 }
@@ -1386,6 +1402,7 @@ static void push_to_pool(struct work_struct *work)
 					      push_work);
 	BUG_ON(!r);
 	_xfer_secondary_pool(r, random_read_wakeup_bits/8);
+	cryptdet_log_entropy(r, "PUSH", random_read_wakeup_bits/8);	
 	trace_push_to_pool(r->name, r->entropy_count >> ENTROPY_SHIFT,
 			   r->pull->entropy_count >> ENTROPY_SHIFT);
 }
@@ -1553,6 +1570,7 @@ static ssize_t extract_entropy(struct entropy_store *r, void *buf,
 			spin_unlock_irqrestore(&r->lock, flags);
 			trace_extract_entropy(r->name, EXTRACT_SIZE,
 					      ENTROPY_BITS(r), _RET_IP_);
+			cryptdet_log_entropy(r, "EXTRACT", -EXTRACT_SIZE*8);
 			xfer_secondary_pool(r, EXTRACT_SIZE);
 			extract_buf(r, tmp);
 			spin_lock_irqsave(&r->lock, flags);
@@ -1562,6 +1580,7 @@ static ssize_t extract_entropy(struct entropy_store *r, void *buf,
 	}
 
 	trace_extract_entropy(r->name, nbytes, ENTROPY_BITS(r), _RET_IP_);
+	cryptdet_log_entropy(r, "EXTRACT", -nbytes * 8);
 	xfer_secondary_pool(r, nbytes);
 	nbytes = account(r, nbytes, min, reserved);
 
@@ -1580,6 +1599,7 @@ static ssize_t extract_entropy_user(struct entropy_store *r, void __user *buf,
 	int large_request = (nbytes > 256);
 
 	trace_extract_entropy_user(r->name, nbytes, ENTROPY_BITS(r), _RET_IP_);
+	cryptdet_log_entropy(r, "USER_EXTRACT", -nbytes * 8);
 	xfer_secondary_pool(r, nbytes);
 	nbytes = account(r, nbytes, 0, 0);
 
@@ -1785,6 +1805,7 @@ int __must_check get_random_bytes_arch(void *buf, int nbytes)
 	char *p = buf;
 
 	trace_get_random_bytes_arch(left, _RET_IP_);
+	printk("Reading %d bytes from architecture-specific HW-RNG", nbytes);
 	while (left) {
 		unsigned long v;
 		int chunk = min_t(int, left, sizeof(unsigned long));
@@ -2077,6 +2098,7 @@ static long random_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 				    size);
 		if (retval < 0)
 			return retval;
+		cryptdet_log_entropy(&input_pool, "HWRND", ent_count);
 		return credit_entropy_bits_safe(&input_pool, ent_count);
 	case RNDZAPENTCNT:
 	case RNDCLEARPOOL:
@@ -2469,3 +2491,7 @@ void add_hwgenerator_randomness(const char *buffer, size_t count,
 	credit_entropy_bits(poolp, entropy);
 }
 EXPORT_SYMBOL_GPL(add_hwgenerator_randomness);
+
+static void cryptdet_log_entropy(struct entropy_store* pool, const char* event, __s32 entropy_change) {
+	printk("CRYPTDET_ENTROPY_LOG %s %s %d %u %u", pool->name, event, entropy_change, pool->entropy_count, ENTROPY_BITS(pool));
+}
